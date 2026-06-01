@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>✦ Command Center</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', 'Segoe UI', sans-serif; background: linear-gradient(150deg,#f8fafc 0%,#eef2ff 60%,#f0fdf4 100%); min-height: 100vh; }
+    @keyframes slideUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #6366f1; }
+    button { font-family: inherit; }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #f1f5f9; } ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const STORAGE_KEY = "todos-master-v2";
+const LAST_SYNC_KEY = "todos-last-sync-v2";
+
+const PRIORITY_LABELS = {
+  1: { label: "1 · Urgent", color: "#dc2626", bg: "#fef2f2" },
+  2: { label: "2 · High",   color: "#ea580c", bg: "#fff7ed" },
+  3: { label: "3 · Medium", color: "#ca8a04", bg: "#fefce8" },
+  4: { label: "4 · Low",    color: "#16a34a", bg: "#f0fdf4" },
+};
+const STATUS_OPTIONS = [
+  { value: "not_started", label: "Not Started", icon: "○", color: "#6b7280" },
+  { value: "in_process",  label: "In Process",  icon: "◑", color: "#2563eb" },
+  { value: "waiting",     label: "Waiting",     icon: "⏸", color: "#d97706" },
+  { value: "done",        label: "Done",        icon: "✓", color: "#16a34a" },
+];
+const TYPE_OPTIONS = [
+  "Follow Up Today","Meeting","Boards/Advising","Financial/Tax",
+  "Info to Review","Family/Kids' School","Classes",
+  "Purchases/Shipments Expected","Email","Other",
+];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const genId = () => "todo-" + Date.now() + "-" + Math.random().toString(36).slice(2,6);
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  const datePart = iso.split("T")[0];
+  const parts = datePart.split("-").map(Number);
+  if (parts.length === 3) {
+    const d = new Date(parts[0], parts[1]-1, parts[2]);
+    return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+  }
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+}
+
+function isOverdue(d) {
+  if (!d) return false;
+  const [y,m,day] = d.split("T")[0].split("-").map(Number);
+  const due = new Date(y, m-1, day);
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  return due < today;
+}
+
+// ─── Storage (localStorage with sessionStorage fallback) ──────────────────────
+function storeSave(key, val) {
+  try { localStorage.setItem(key, val); return; } catch {}
+  try { sessionStorage.setItem(key, val); } catch {}
+}
+function storeLoad(key) {
+  try { const v = localStorage.getItem(key); if (v != null) return v; } catch {}
+  try { return sessionStorage.getItem(key); } catch {}
+  return null;
+}
+
+// ─── Merge ────────────────────────────────────────────────────────────────────
+function mergeItems(existing, incoming, sourceFile) {
+  const out = [...existing];
+  let added = 0, updated = 0;
+  for (const item of incoming) {
+    const dupIdx = out.findIndex(t =>
+      (item.source_email_link && t.source_email_link === item.source_email_link) ||
+      (!item.source_email_link && t.title === item.title && t.sender === item.sender)
+    );
+    const base = dupIdx >= 0 ? out[dupIdx] : null;
+    const merged = {
+      id:                   base ? base.id : genId(),
+      title:                item.title || "(no title)",
+      type:                 item.type  || "Other",
+      priority:             Number(item.priority) || 3,
+      details:              item.details || "",
+      source_email_account: item.source_email_account || "",
+      source_email_link:    item.source_email_link || "",
+      date_received:        item.date_received || "",
+      due_date:             item.due_date || "",
+      sender:               item.sender || "",
+      source_file:          sourceFile,
+      status:        base ? base.status         : "not_started",
+      tags:          base ? base.tags           : [],
+      notes:         base ? base.notes          : "",
+      scheduled_date:base ? base.scheduled_date : "",
+      subtasks:      base ? base.subtasks       : [],
+      completed:     base ? base.completed      : false,
+      completed_date:base ? base.completed_date : "",
+      date_added:    base ? base.date_added     : new Date().toISOString(),
+      last_synced:   new Date().toISOString(),
+    };
+    if (base) { out[dupIdx] = merged; updated++; }
+    else       { out.push(merged);    added++;   }
+  }
+  return { todos: out, added, updated };
+}
+
+function parseJSON(raw) {
+  const s = raw.replace(/```json\s*/gi,"").replace(/```/g,"").trim();
+  const positions = ["[","{"].map(c=>s.indexOf(c)).filter(i=>i>=0);
+  if (!positions.length) throw new Error("No JSON found");
+  const start = Math.min(...positions);
+  const opener = s[start], closer = opener==="["?"]":"}";
+  let depth=0, end=-1;
+  for (let i=start;i<s.length;i++) {
+    if(s[i]===opener) depth++; else if(s[i]===closer&&--depth===0){end=i;break;}
+  }
+  if (end===-1) throw new Error("Unmatched brackets");
+  return JSON.parse(s.slice(start,end+1));
+}
+
+// ─── Small components ─────────────────────────────────────────────────────────
+function Tag({ label, onRemove }) {
+  return (
+    <span style={{display:"inline-flex",alignItems:"center",gap:3,background:"#eff6ff",color:"#1d4ed8",borderRadius:99,padding:"2px 9px",fontSize:11,fontWeight:600,fontFamily:"monospace"}}>
+      {label}
+      {onRemove && <button onClick={onRemove} style={{all:"unset",cursor:"pointer",fontSize:13,lineHeight:1,opacity:.6}}>×</button>}
+    </span>
+  );
+}
+
+function StatusPill({ status }) {
+  const s = STATUS_OPTIONS.find(o=>o.value===status)||STATUS_OPTIONS[0];
+  const bg = {not_started:"#f3f4f6",in_process:"#dbeafe",waiting:"#fef3c7",done:"#dcfce7"};
+  return <span style={{background:bg[status]||bg.not_started,color:s.color,borderRadius:99,padding:"2px 10px",fontSize:11,fontWeight:700,letterSpacing:".03em"}}>{s.icon} {s.label}</span>;
+}
+
+function PriorityBar({ priority }) {
+  const p = PRIORITY_LABELS[priority]||PRIORITY_LABELS[3];
+  return <span style={{width:3,borderRadius:99,alignSelf:"stretch",background:p.color,flexShrink:0,minHeight:40}}/>;
+}
+
+// ─── Reminders Panel ──────────────────────────────────────────────────────────
+function RemindersPanel({ onImport, onClose }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  function handleImport() {
+    setError(""); setSuccess("");
+    if (!text.trim()) { setError("Nothing pasted yet."); return; }
+    let parsed;
+    try {
+      const s = text.replace(/```json\s*/gi,"").replace(/```/g,"").trim();
+      const positions = ["[","{"].map(c=>s.indexOf(c)).filter(i=>i>=0);
+      if (!positions.length) throw new Error("No JSON found");
+      const start = Math.min(...positions);
+      const opener = s[start], closer = opener==="["?"]":"}";
+      let depth=0, end=-1;
+      for (let i=start;i<s.length;i++) {
+        if(s[i]===opener) depth++; else if(s[i]===closer&&--depth===0){end=i;break;}
+      }
+      parsed = JSON.parse(s.slice(start,end+1));
+    } catch(e) { setError("Could not parse JSON: " + e.message); return; }
+
+    const items = Array.isArray(parsed) ? parsed : parsed.reminders || parsed.items || [parsed];
+    const asTodos = items.map(r => ({
+      title: r.title || "(untitled)",
+      type: "Other",
+      priority: 3,
+      details: r.notes || "",
+      source_email_account: "reminders",
+      source_email_link: "",
+      date_received: new Date().toISOString(),
+      due_date: r.due_date || "",
+      sender: r.list || "Reminders",
+    }));
+
+    onImport([{ items: asTodos, file: "reminders", account: "reminders" }]);
+    setSuccess("✓ " + asTodos.length + " reminder(s) imported. You can close this panel.");
+    setText("");
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.55)",backdropFilter:"blur(6px)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#fff",borderRadius:20,padding:32,width:"100%",maxWidth:580,boxShadow:"0 32px 80px rgba(0,0,0,.22)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <h2 style={{margin:0,fontFamily:"'Playfair Display',serif",fontSize:21,color:"#0f172a"}}>🔔 Sync from Reminders</h2>
+          <button onClick={onClose} style={{all:"unset",cursor:"pointer",fontSize:22,color:"#94a3b8",lineHeight:1}}>✕</button>
+        </div>
+        <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:10,padding:"12px 16px",fontSize:13,color:"#0369a1",marginBottom:16,lineHeight:1.7}}>
+          <strong>Two steps:</strong><br/>
+          1. Tell Siri: <em>"Hey Siri, remind me to [your to-do]"</em><br/>
+          2. Go to Claude chat and say <strong>"sync my reminders"</strong> — paste the JSON block below.
+        </div>
+        <div style={{border:"1.5px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
+          <div style={{padding:"7px 12px",background:"#f8fafc",fontSize:11,color:"#94a3b8",fontFamily:"monospace",borderBottom:"1px solid #e2e8f0"}}>paste reminders JSON here</div>
+          <textarea value={text} onChange={e=>setText(e.target.value)}
+            placeholder='[{"title":"Call dentist","due_date":null,"notes":"","list":"Reminders"}]'
+            style={{width:"100%",minHeight:160,padding:"12px",border:"none",outline:"none",fontSize:12,fontFamily:"monospace",resize:"vertical",background:"#fff",boxSizing:"border-box",color:"#1e293b"}}/>
+        </div>
+        {error   && <div style={{marginTop:10,padding:"8px 12px",background:"#fef2f2",color:"#dc2626",borderRadius:8,fontSize:12,fontFamily:"monospace"}}>{error}</div>}
+        {success && <div style={{marginTop:10,padding:"8px 12px",background:"#f0fdf4",color:"#16a34a",borderRadius:8,fontSize:13,fontWeight:600}}>{success}</div>}
+        <div style={{display:"flex",gap:10,marginTop:18,justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{padding:"9px 22px",borderRadius:9,border:"1.5px solid #e2e8f0",background:"#fff",cursor:"pointer",fontWeight:600,color:"#475569",fontSize:13}}>Close</button>
+          <button onClick={handleImport} style={{padding:"9px 24px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#0ea5e9,#6366f1)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:14}}>↓ Import</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Import Panel ─────────────────────────────────────────────────────────────
+function ImportPanel({ onImport, onClose }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  function handleImport() {
+    setError(""); setSuccess("");
+    if (!text.trim()) { setError("Nothing pasted yet."); return; }
+    let parsed;
+    try { parsed = parseJSON(text); } catch(e) { setError("Could not parse JSON: " + e.message); return; }
+
+    const results = [];
+    if (!Array.isArray(parsed) && (parsed.ef || parsed.gm)) {
+      if (parsed.ef && parsed.ef.length) results.push({ items: parsed.ef, file: "To-dos-ef.json", account: "elissa@elissafink.com" });
+      if (parsed.gm && parsed.gm.length) results.push({ items: parsed.gm, file: "To-dos-gm.json", account: "gmail" });
+    } else {
+      const items = Array.isArray(parsed) ? parsed : parsed.todos || parsed.items || [parsed];
+      const ef = items.filter(i => i.source_email_account && i.source_email_account.includes("elissafink.com") && !i.source_email_account.includes("gmail"));
+      const gm = items.filter(i => i.source_email_account && i.source_email_account.includes("gmail"));
+      const other = items.filter(i => !i.source_email_account || (!i.source_email_account.includes("elissafink.com") && !i.source_email_account.includes("gmail")));
+      if (ef.length)    results.push({ items: ef,    file: "To-dos-ef.json", account: "elissa@elissafink.com" });
+      if (gm.length)    results.push({ items: gm,    file: "To-dos-gm.json", account: "gmail" });
+      if (other.length) results.push({ items: other, file: "To-dos-ef.json", account: "elissa@elissafink.com" });
+    }
+    if (!results.length) { setError("No to-do items found in the pasted JSON."); return; }
+    onImport(results);
+    const total = results.reduce((a,r)=>a+r.items.length,0);
+    setSuccess("✓ " + total + " items imported. You can close this panel.");
+    setText("");
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.55)",backdropFilter:"blur(6px)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#fff",borderRadius:20,padding:32,width:"100%",maxWidth:600,boxShadow:"0 32px 80px rgba(0,0,0,.22)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <h2 style={{margin:0,fontFamily:"'Playfair Display',serif",fontSize:21,color:"#0f172a"}}>Import To-Dos</h2>
+          <button onClick={onClose} style={{all:"unset",cursor:"pointer",fontSize:22,color:"#94a3b8",lineHeight:1}}>✕</button>
+        </div>
+        <p style={{margin:"0 0 16px",fontSize:13,color:"#64748b",lineHeight:1.6}}>
+          Say <strong>"sync my todos"</strong> in Claude chat and paste the JSON block here.
+        </p>
+        <div style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:8,padding:"10px 14px",fontSize:11,fontFamily:"monospace",color:"#475569",marginBottom:16,lineHeight:1.8}}>
+          {'{ "ef": [...], "gm": [...] }'}{"   ← combined (Claude's format)"}<br/>
+          {'[ { ...todo }, { ...todo } ]'}{"  ← flat array"}<br/>
+          {'{ "todos": [...] }'}{"            ← single file"}
+        </div>
+        <div style={{border:"1.5px solid #e2e8f0",borderRadius:10,overflow:"hidden"}}>
+          <div style={{padding:"7px 12px",background:"#f8fafc",fontSize:11,color:"#94a3b8",fontFamily:"monospace",borderBottom:"1px solid #e2e8f0"}}>paste JSON here</div>
+          <textarea value={text} onChange={e=>setText(e.target.value)}
+            placeholder='{ "ef": [...], "gm": [...] }'
+            style={{width:"100%",minHeight:200,padding:"12px",border:"none",outline:"none",fontSize:12,fontFamily:"monospace",resize:"vertical",background:"#fff",boxSizing:"border-box",color:"#1e293b"}}/>
+        </div>
+        {error   && <div style={{marginTop:10,padding:"8px 12px",background:"#fef2f2",color:"#dc2626",borderRadius:8,fontSize:12,fontFamily:"monospace"}}>{error}</div>}
+        {success && <div style={{marginTop:10,padding:"8px 12px",background:"#f0fdf4",color:"#16a34a",borderRadius:8,fontSize:13,fontWeight:600}}>{success}</div>}
+        <div style={{display:"flex",gap:10,marginTop:18,justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{padding:"9px 22px",borderRadius:9,border:"1.5px solid #e2e8f0",background:"#fff",cursor:"pointer",fontWeight:600,color:"#475569",fontSize:13}}>Close</button>
+          <button onClick={handleImport} style={{padding:"9px 24px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:14}}>↓ Import</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Edit Modal ───────────────────────────────────────────────────────────────
+function EditModal({ todo, onSave, onDelete, onClose }) {
+  const [f, setF] = useState({...todo});
+  const [newTag, setNewTag] = useState("");
+  const [newSub, setNewSub] = useState("");
+  const set = (k,v) => setF(p=>({...p,[k]:v}));
+
+  const addTag = () => { const t=newTag.trim(); if(t&&!(f.tags||[]).includes(t)){set("tags",[...(f.tags||[]),t]);setNewTag("");} };
+  const addSub = () => { if(newSub.trim()){set("subtasks",[...(f.subtasks||[]),{id:genId(),text:newSub.trim(),completed:false}]);setNewSub("");} };
+
+  const FI = {width:"100%",padding:"8px 11px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,fontFamily:"inherit",background:"#f8fafc",outline:"none",boxSizing:"border-box",color:"#1e293b"};
+  const LB = {display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:4,letterSpacing:".06em",textTransform:"uppercase"};
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,.5)",backdropFilter:"blur(5px)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={onClose}>
+      <div style={{background:"#fff",borderRadius:20,padding:28,width:"100%",maxWidth:600,maxHeight:"92vh",overflowY:"auto",boxShadow:"0 24px 64px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+
+        {/* Header with buttons */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,gap:10}}>
+          <h2 style={{margin:0,fontFamily:"'Playfair Display',serif",fontSize:20,color:"#0f172a",flex:1,minWidth:0}}>{f.title||"New To-Do"}</h2>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+            {onDelete && <button onClick={()=>onDelete(f.id)} style={{padding:"7px 14px",borderRadius:8,border:"1.5px solid #fecaca",background:"#fff",cursor:"pointer",fontWeight:600,color:"#dc2626",fontSize:13}}>🗑 Delete</button>}
+            <button onClick={()=>onSave(f)} style={{padding:"7px 18px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:14}}>Save</button>
+            <button onClick={onClose} style={{all:"unset",cursor:"pointer",fontSize:20,color:"#94a3b8",lineHeight:1,paddingLeft:4}}>✕</button>
+          </div>
+        </div>
+
+        <div style={{display:"grid",gap:14}}>
+          <div><label style={LB}>Title</label><input style={FI} value={f.title} onChange={e=>set("title",e.target.value)}/></div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div><label style={LB}>Type</label>
+              <select style={FI} value={f.type} onChange={e=>set("type",e.target.value)}>
+                {TYPE_OPTIONS.map(t=><option key={t}>{t}</option>)}
+              </select>
+            </div>
+            <div><label style={LB}>Priority</label>
+              <select style={FI} value={f.priority} onChange={e=>set("priority",Number(e.target.value))}>
+                {Object.entries(PRIORITY_LABELS).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div><label style={LB}>Status</label>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {STATUS_OPTIONS.map(s=>(
+                <button key={s.value} onClick={()=>set("status",s.value)} style={{padding:"5px 13px",borderRadius:99,fontSize:12,cursor:"pointer",border:"2px solid "+(f.status===s.value?"#6366f1":"#e2e8f0"),background:f.status===s.value?"#6366f1":"#fff",color:f.status===s.value?"#fff":"#475569",fontWeight:600,fontFamily:"inherit"}}>
+                  {s.icon} {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <div><label style={LB}>Due Date</label><input type="date" style={FI} value={f.due_date||""} onChange={e=>set("due_date",e.target.value)}/></div>
+            <div><label style={LB}>Scheduled For</label><input type="date" style={FI} value={f.scheduled_date||""} onChange={e=>set("scheduled_date",e.target.value)}/></div>
+          </div>
+
+          <div><label style={LB}>Details (from email)</label>
+            <textarea style={{...FI,minHeight:80,resize:"vertical"}} value={f.details} onChange={e=>set("details",e.target.value)}/>
+          </div>
+
+          <div><label style={LB}>My Notes</label>
+            <textarea style={{...FI,minHeight:56,resize:"vertical"}} value={f.notes} onChange={e=>set("notes",e.target.value)} placeholder="Your own notes…"/>
+          </div>
+
+          <div><label style={LB}>Tags</label>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:6}}>
+              {(f.tags||[]).map(t=><Tag key={t} label={t} onRemove={()=>set("tags",f.tags.filter(x=>x!==t))}/>)}
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              <input style={{...FI,flex:1}} value={newTag} onChange={e=>setNewTag(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTag()} placeholder="Add tag…"/>
+              <button onClick={addTag} style={{padding:"8px 14px",background:"#6366f1",color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:15}}>+</button>
+            </div>
+          </div>
+
+          <div><label style={LB}>Subtasks / Checklist</label>
+            <div style={{marginBottom:8}}>
+              {(f.subtasks||[]).map((s,i)=>(
+                <div key={s.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #f1f5f9"}}>
+                  <input type="checkbox" checked={s.completed} onChange={e=>{const u=[...f.subtasks];u[i]={...s,completed:e.target.checked};set("subtasks",u);}} style={{accentColor:"#6366f1"}}/>
+                  <span style={{flex:1,fontSize:13,color:s.completed?"#94a3b8":"#1e293b",textDecoration:s.completed?"line-through":"none"}}>{s.text}</span>
+                  <button onClick={()=>set("subtasks",f.subtasks.filter((_,j)=>j!==i))} style={{all:"unset",cursor:"pointer",color:"#fca5a5",fontSize:14}}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              <input style={{...FI,flex:1}} value={newSub} onChange={e=>setNewSub(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addSub()} placeholder="Add subtask…"/>
+              <button onClick={addSub} style={{padding:"8px 14px",background:"#6366f1",color:"#fff",border:"none",borderRadius:8,cursor:"pointer",fontWeight:700,fontSize:15}}>+</button>
+            </div>
+          </div>
+
+          {(f.sender||f.source_email_link) && (
+            <div style={{background:"#f8fafc",borderRadius:10,padding:"10px 14px",fontSize:12,color:"#64748b",lineHeight:1.7}}>
+              {f.sender && <div><b>From:</b> {f.sender}</div>}
+              {f.date_received && <div><b>Received:</b> {fmtDate(f.date_received)}</div>}
+              {f.source_email_account && <div><b>Account:</b> {f.source_email_account}</div>}
+              {f.source_email_link && <div><a href={f.source_email_link} target="_blank" rel="noreferrer" style={{color:"#6366f1"}}>Open original email →</a></div>}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Todo Card ────────────────────────────────────────────────────────────────
+function TodoCard({ todo, onEdit, onDelete, onToggle }) {
+  const over = isOverdue(todo.due_date) && !todo.completed;
+  return (
+    <div
+      onClick={()=>onEdit(todo)}
+      style={{display:"flex",gap:0,background:todo.completed?"#fafafa":"#fff",border:"1px solid "+(over?"#fecaca":todo.completed?"#e2e8f0":"#e8edf2"),borderRadius:12,marginBottom:8,cursor:"pointer",overflow:"hidden",transition:"box-shadow .15s"}}
+      onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 20px rgba(99,102,241,.1)"}
+      onMouseLeave={e=>e.currentTarget.style.boxShadow="none"}
+    >
+      <PriorityBar priority={todo.priority}/>
+      <div style={{flex:1,padding:"13px 14px",minWidth:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:5}}>
+          <button
+            onClick={e=>{e.stopPropagation();onToggle(todo.id);}}
+            style={{all:"unset",width:20,height:20,borderRadius:"50%",flexShrink:0,border:"2px solid "+(todo.completed?"#16a34a":"#cbd5e1"),background:todo.completed?"#16a34a":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:11}}
+          >{todo.completed?"✓":""}</button>
+          <span style={{flex:1,fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:700,color:todo.completed?"#94a3b8":"#0f172a",textDecoration:todo.completed?"line-through":"none",minWidth:0}}>
+            {todo.title}
+          </span>
+          <StatusPill status={todo.status}/>
+          <button onClick={e=>{e.stopPropagation();onDelete(todo.id);}} style={{all:"unset",cursor:"pointer",color:"#cbd5e1",fontSize:14,padding:"2px 4px",borderRadius:4}} onMouseEnter={e=>e.target.style.color="#f87171"} onMouseLeave={e=>e.target.style.color="#cbd5e1"}>✕</button>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",fontSize:11,color:"#94a3b8"}}>
+          {todo.type && <span style={{background:"#f1f5f9",borderRadius:5,padding:"1px 7px",color:"#475569",fontWeight:600}}>{todo.type}</span>}
+          {todo.due_date && <span style={{color:over?"#dc2626":"#94a3b8",fontWeight:over?700:400}}>{over?"⚠ overdue: ":"📅 "}{fmtDate(todo.due_date)}</span>}
+          {todo.scheduled_date && <span style={{color:"#6366f1"}}>🗓 {fmtDate(todo.scheduled_date)}</span>}
+          {todo.sender && <span>✉ {todo.sender}</span>}
+          {todo.subtasks && todo.subtasks.length>0 && <span>{todo.subtasks.filter(s=>s.completed).length}/{todo.subtasks.length} done</span>}
+          <span style={{marginLeft:"auto",color:"#cbd5e1",fontSize:10}}>{(todo.source_file||"").replace("To-dos-","").replace(".json","")}</span>
+        </div>
+        {todo.tags && todo.tags.length>0 && (
+          <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:6}}>
+            {todo.tags.map(t=><Tag key={t} label={t}/>)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [todos, setTodos]       = useState([]);
+  const [loaded, setLoaded]     = useState(false);
+  const [lastSync, setLastSync] = useState(null);
+  const [editing, setEditing]   = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [importingReminders, setImportingReminders] = useState(false);
+  const [toast, setToast]       = useState(null);
+  const [filter, setFilter]     = useState({status:"all",priority:"all",type:"all",source:"all",search:"",showDone:false});
+  const [sortBy, setSortBy]     = useState("priority");
+
+  const flash = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null),3200); };
+
+  useEffect(()=>{
+    const raw = storeLoad(STORAGE_KEY);
+    if (raw) { try { setTodos(JSON.parse(raw)); } catch {} }
+    const ls = storeLoad(LAST_SYNC_KEY);
+    if (ls) setLastSync(ls);
+    setLoaded(true);
+  },[]);
+
+  const persist = useCallback((next) => {
+    setTodos(next);
+    storeSave(STORAGE_KEY, JSON.stringify(next));
+  },[]);
+
+  const handleImport = (results) => {
+    let current = [...todos];
+    let totalAdded=0, totalUpdated=0;
+    for (const {items, file} of results) {
+      const {todos:merged, added, updated} = mergeItems(current, items, file);
+      current = merged; totalAdded+=added; totalUpdated+=updated;
+    }
+    persist(current);
+    const now = new Date().toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+    setLastSync(now);
+    storeSave(LAST_SYNC_KEY, now);
+    flash("✓ " + totalAdded + " added · " + totalUpdated + " updated");
+  };
+
+  const saveTodo = (updated) => {
+    const synced = {
+      ...updated,
+      completed: updated.status === "done",
+      completed_date: updated.status === "done" ? (updated.completed_date || new Date().toISOString()) : "",
+    };
+    const next = todos.find(t=>t.id===synced.id)
+      ? todos.map(t=>t.id===synced.id?synced:t)
+      : [...todos, synced];
+    persist(next);
+    setEditing(null);
+    flash("Saved");
+  };
+
+  const deleteTodo = (id) => {
+    persist(todos.filter(t=>t.id!==id));
+    flash("Deleted","warn");
+  };
+
+  const toggleDone = (id) => {
+    persist(todos.map(t=>t.id===id ? {
+      ...t, completed:!t.completed,
+      status: !t.completed?"done":"not_started",
+      completed_date: !t.completed ? new Date().toISOString() : "",
+    }:t));
+  };
+
+  const newTodo = () => setEditing({
+    id:genId(),title:"",type:"Other",priority:3,details:"",
+    source_email_account:"",source_email_link:"",date_received:"",
+    due_date:"",sender:"",status:"not_started",tags:[],notes:"",
+    scheduled_date:"",subtasks:[],completed:false,completed_date:"",
+    date_added:new Date().toISOString(),source_file:"manual",last_synced:new Date().toISOString(),
+  });
+
+  const visible = todos.filter(t=>{
+    if (!filter.showDone && t.completed) return false;
+    if (filter.status!=="all" && t.status!==filter.status) return false;
+    if (filter.priority!=="all" && String(t.priority)!==filter.priority) return false;
+    if (filter.type!=="all" && t.type!==filter.type) return false;
+    if (filter.source!=="all" && t.source_file!==filter.source) return false;
+    if (filter.search) {
+      const q=filter.search.toLowerCase();
+      return [t.title,t.details,t.sender,...(t.tags||[])].some(x=>x&&x.toLowerCase().includes(q));
+    }
+    return true;
+  }).sort((a,b)=>{
+    if (sortBy==="priority") return a.priority-b.priority;
+    if (sortBy==="due") { if(!a.due_date)return 1; if(!b.due_date)return -1; return a.due_date.localeCompare(b.due_date); }
+    if (sortBy==="newest") return new Date(b.date_added)-new Date(a.date_added);
+    if (sortBy==="status") return a.status.localeCompare(b.status);
+    return 0;
+  });
+
+  const active  = todos.filter(t=>!t.completed).length;
+  const overdue = todos.filter(t=>isOverdue(t.due_date)&&!t.completed).length;
+  const urgent  = todos.filter(t=>t.priority===1&&!t.completed).length;
+
+  const SEL = {padding:"6px 11px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:12,fontFamily:"inherit",background:"#fff",color:"#475569",cursor:"pointer"};
+
+  if (!loaded) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <span style={{fontFamily:"'Playfair Display',serif",fontSize:22,color:"#6366f1"}}>Loading…</span>
+    </div>
+  );
+
+  return (
+    <div style={{minHeight:"100vh"}}>
+      {/* Header */}
+      <header style={{position:"sticky",top:0,zIndex:100,background:"rgba(255,255,255,.9)",backdropFilter:"blur(12px)",borderBottom:"1px solid rgba(99,102,241,.1)",padding:"14px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+        <div>
+          <h1 style={{margin:0,fontFamily:"'Playfair Display',serif",fontSize:24,color:"#0f172a",letterSpacing:"-.02em"}}>✦ Command Center</h1>
+          <div style={{fontSize:11,color:"#94a3b8",marginTop:2,fontFamily:"monospace"}}>
+            {active} active · {todos.filter(t=>t.completed).length} done
+            {overdue>0 && <span style={{color:"#dc2626",fontWeight:700}}> · {overdue} overdue</span>}
+            {urgent>0  && <span style={{color:"#ea580c",fontWeight:700}}> · {urgent} urgent</span>}
+            {lastSync  && <span style={{marginLeft:10,color:"#cbd5e1"}}>synced {lastSync}</span>}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={()=>setImporting(true)} style={{padding:"7px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>↓ Import from Dropbox</button>
+          <button onClick={()=>setImportingReminders(true)} style={{padding:"7px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#0ea5e9,#6366f1)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>🔔 Sync Reminders</button>
+          <button onClick={newTodo} style={{padding:"7px 16px",borderRadius:9,border:"1.5px solid #6366f1",background:"#fff",color:"#6366f1",cursor:"pointer",fontWeight:700,fontSize:13}}>+ Add To-Do</button>
+        </div>
+      </header>
+
+      {/* Filter bar */}
+      <div style={{padding:"10px 24px",display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",background:"rgba(255,255,255,.6)",borderBottom:"1px solid rgba(226,232,240,.8)"}}>
+        <input style={{...SEL,width:190}} placeholder="🔍 Search…" value={filter.search} onChange={e=>setFilter(f=>({...f,search:e.target.value}))}/>
+        <select style={SEL} value={filter.status} onChange={e=>setFilter(f=>({...f,status:e.target.value}))}>
+          <option value="all">All Statuses</option>
+          {STATUS_OPTIONS.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+        <select style={SEL} value={filter.priority} onChange={e=>setFilter(f=>({...f,priority:e.target.value}))}>
+          <option value="all">All Priorities</option>
+          {Object.entries(PRIORITY_LABELS).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+        </select>
+        <select style={SEL} value={filter.type} onChange={e=>setFilter(f=>({...f,type:e.target.value}))}>
+          <option value="all">All Types</option>
+          {TYPE_OPTIONS.map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+        <select style={SEL} value={filter.source} onChange={e=>setFilter(f=>({...f,source:e.target.value}))}>
+          <option value="all">Both Accounts</option>
+          <option value="To-dos-ef.json">ef · elissa@elissafink.com</option>
+          <option value="To-dos-gm.json">gm · gmail</option>
+          <option value="reminders">🔔 Reminders</option>
+        </select>
+        <select style={SEL} value={sortBy} onChange={e=>setSortBy(e.target.value)}>
+          <option value="priority">Priority</option>
+          <option value="due">Due Date</option>
+          <option value="newest">Newest</option>
+          <option value="status">Status</option>
+        </select>
+        <label style={{fontSize:12,color:"#64748b",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
+          <input type="checkbox" checked={filter.showDone} onChange={e=>setFilter(f=>({...f,showDone:e.target.checked}))} style={{accentColor:"#6366f1"}}/>
+          Show Completed
+        </label>
+        <span style={{marginLeft:"auto",fontSize:11,color:"#94a3b8",fontFamily:"monospace"}}>{visible.length} shown</span>
+      </div>
+
+      {/* List */}
+      <main style={{padding:"18px 24px",maxWidth:820,margin:"0 auto"}}>
+        {visible.length===0 ? (
+          <div style={{textAlign:"center",padding:"70px 0",color:"#94a3b8"}}>
+            {todos.length===0
+              ? <div><p style={{fontSize:16,marginBottom:8}}>No to-dos yet.</p><p style={{fontSize:13}}>Click <b>↓ Import from Dropbox</b> to load your files,<br/>or <b>+ Add To-Do</b> to create one manually.</p></div>
+              : <p style={{fontSize:14}}>No to-dos match the current filters.</p>}
+          </div>
+        ) : visible.map(t=>(
+          <TodoCard key={t.id} todo={t} onEdit={setEditing} onDelete={deleteTodo} onToggle={toggleDone}/>
+        ))}
+      </main>
+
+      {importing          && <ImportPanel    onImport={handleImport} onClose={()=>setImporting(false)}/>}
+      {importingReminders && <RemindersPanel onImport={handleImport} onClose={()=>setImportingReminders(false)}/>}
+      {editing && <EditModal todo={editing} onSave={saveTodo} onDelete={async(id)=>{deleteTodo(id);setEditing(null);}} onClose={()=>setEditing(null)}/>}
+
+      {toast && (
+        <div style={{position:"fixed",bottom:24,right:24,zIndex:999,padding:"11px 20px",borderRadius:11,fontWeight:700,fontSize:13,boxShadow:"0 8px 28px rgba(0,0,0,.15)",animation:"slideUp .2s ease",background:toast.type==="ok"?"#4ade80":toast.type==="warn"?"#fbbf24":"#f87171",color:"#fff"}}>
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
