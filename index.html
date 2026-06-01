@@ -445,7 +445,26 @@ function App() {
   const [importingReminders, setImportingReminders] = useState(false);
   const [toast, setToast]       = useState(null);
   const [filter, setFilter]     = useState({status:"all",priority:"all",type:"all",source:"all",search:"",showDone:false});
-  const [sortBy, setSortBy]     = useState("priority");
+  // Each sort level: { field, dir }  dir = "asc" | "desc"
+  const [sortLevels, setSortLevels] = useState([{field:"priority",dir:"asc"}]);
+
+  const SORT_FIELDS = [
+    {value:"priority",    label:"Priority"},
+    {value:"due_date",    label:"Due Date"},
+    {value:"title",       label:"Title"},
+    {value:"status",      label:"Status"},
+    {value:"date_added",  label:"Date Added"},
+    {value:"date_received",label:"Date Received"},
+    {value:"sender",      label:"Sender"},
+    {value:"type",        label:"Type"},
+  ];
+
+  const addSortLevel = () => {
+    if (sortLevels.length >= 3) return;
+    setSortLevels(prev => [...prev, {field:"title", dir:"asc"}]);
+  };
+  const removeSortLevel = (i) => setSortLevels(prev => prev.filter((_,j)=>j!==i));
+  const updateSortLevel = (i, key, val) => setSortLevels(prev => prev.map((s,j)=>j===i?{...s,[key]:val}:s));
 
   const flash = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null),3200); };
 
@@ -568,10 +587,30 @@ function App() {
     }
     return true;
   }).sort((a,b)=>{
-    if (sortBy==="priority") return a.priority-b.priority;
-    if (sortBy==="due") { if(!a.due_date)return 1; if(!b.due_date)return -1; return a.due_date.localeCompare(b.due_date); }
-    if (sortBy==="newest") return new Date(b.date_added)-new Date(a.date_added);
-    if (sortBy==="status") return a.status.localeCompare(b.status);
+    // Apply sort levels in order; first non-zero result wins (stable multi-sort)
+    for (const {field, dir} of sortLevels) {
+      let result = 0;
+      const mul = dir==="asc" ? 1 : -1;
+      if (field==="priority") {
+        result = (a.priority||99) - (b.priority||99);
+      } else if (field==="due_date") {
+        if (!a.due_date && !b.due_date) result = 0;
+        else if (!a.due_date) result = 1;
+        else if (!b.due_date) result = -1;
+        else result = a.due_date.localeCompare(b.due_date);
+      } else if (field==="date_added" || field==="date_received") {
+        const da = new Date(a[field]||0), db = new Date(b[field]||0);
+        result = da - db;
+      } else if (field==="status") {
+        const order = {not_started:0,in_process:1,waiting:2,done:3};
+        result = (order[a.status]||0) - (order[b.status]||0);
+      } else {
+        // String fields: title, sender, type
+        const va = (a[field]||"").toLowerCase(), vb = (b[field]||"").toLowerCase();
+        result = va < vb ? -1 : va > vb ? 1 : 0;
+      }
+      if (result !== 0) return result * mul;
+    }
     return 0;
   });
 
@@ -633,12 +672,22 @@ function App() {
           <option value="To-dos-gm.json">gm · gmail</option>
           <option value="reminders">🔔 Reminders</option>
         </select>
-        <select style={SEL} value={sortBy} onChange={e=>setSortBy(e.target.value)}>
-          <option value="priority">Priority</option>
-          <option value="due">Due Date</option>
-          <option value="newest">Newest</option>
-          <option value="status">Status</option>
-        </select>
+        {/* Multi-level sort */}
+        {sortLevels.map((level, i) => (
+          <div key={i} style={{display:"flex",alignItems:"center",gap:4}}>
+            {i===0 && <span style={{fontSize:11,color:"#94a3b8",fontWeight:600,whiteSpace:"nowrap"}}>Sort:</span>}
+            {i>0   && <span style={{fontSize:11,color:"#94a3b8",fontWeight:600,whiteSpace:"nowrap"}}>then:</span>}
+            <select style={SEL} value={level.field} onChange={e=>updateSortLevel(i,"field",e.target.value)}>
+              {SORT_FIELDS.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}
+            </select>
+            <select style={SEL} value={level.dir} onChange={e=>updateSortLevel(i,"dir",e.target.value)}>
+              <option value="asc">↑ Asc</option>
+              <option value="desc">↓ Desc</option>
+            </select>
+            {sortLevels.length>1 && <button onClick={()=>removeSortLevel(i)} style={{all:"unset",cursor:"pointer",color:"#cbd5e1",fontSize:16,padding:"0 2px"}} onMouseEnter={e=>e.target.style.color="#f87171"} onMouseLeave={e=>e.target.style.color="#cbd5e1"}>✕</button>}
+          </div>
+        ))}
+        {sortLevels.length < 3 && <button onClick={addSortLevel} style={{padding:"5px 10px",borderRadius:7,border:"1.5px dashed #cbd5e1",background:"transparent",color:"#94a3b8",cursor:"pointer",fontSize:11,fontWeight:600,whiteSpace:"nowrap"}}>+ then by</button>}
         <label style={{fontSize:12,color:"#64748b",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
           <input type="checkbox" checked={filter.showDone} onChange={e=>setFilter(f=>({...f,showDone:e.target.checked}))} style={{accentColor:"#6366f1"}}/>
           Show Completed
