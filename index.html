@@ -502,6 +502,51 @@ function App() {
     }:t));
   };
 
+
+  const exportBackup = () => {
+    const backup = {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      todos: todos,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], {type: "application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "command-center-backup-" + new Date().toISOString().slice(0,10) + ".json";
+    a.click();
+    URL.revokeObjectURL(url);
+    flash("✓ Backup downloaded");
+  };
+
+  const importBackup = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        // Accept either { version, todos: [...] } or a raw array
+        const incoming = Array.isArray(parsed) ? parsed : parsed.todos || [];
+        if (!incoming.length) { flash("No to-dos found in file", "warn"); return; }
+        // Merge with existing — preserves any local edits not in the backup
+        const { todos: merged, added, updated } = mergeItems(todos, incoming, null);
+        // For backup restore, keep source_file from the incoming data
+        const restored = merged.map(t => {
+          const src = incoming.find(i => i.id === t.id);
+          return src ? { ...t, source_file: src.source_file } : t;
+        });
+        persist(restored);
+        flash("✓ " + added + " restored · " + updated + " updated");
+      } catch(err) {
+        flash("Could not read backup file: " + err.message, "warn");
+      }
+      // Reset file input so same file can be re-imported
+      e.target.value = "";
+    };
+    reader.readAsText(file);
+  };
+
   const newTodo = () => setEditing({
     id:genId(),title:"",type:"Other",priority:3,details:"",
     source_email_account:"",source_email_link:"",date_received:"",
@@ -557,6 +602,11 @@ function App() {
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <button onClick={()=>setImporting(true)} style={{padding:"7px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#6366f1,#8b5cf6)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>↓ Import from Dropbox</button>
           <button onClick={()=>setImportingReminders(true)} style={{padding:"7px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#0ea5e9,#6366f1)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>🔔 Sync Reminders</button>
+          <button onClick={exportBackup} style={{padding:"7px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#16a34a,#0ea5e9)",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>↑ Export Backup</button>
+          <label style={{padding:"7px 16px",borderRadius:9,border:"1.5px solid #16a34a",background:"#fff",color:"#16a34a",cursor:"pointer",fontWeight:700,fontSize:13}}>
+            ↓ Restore Backup
+            <input type="file" accept=".json" onChange={importBackup} style={{display:"none"}}/>
+          </label>
           <button onClick={newTodo} style={{padding:"7px 16px",borderRadius:9,border:"1.5px solid #6366f1",background:"#fff",color:"#6366f1",cursor:"pointer",fontWeight:700,fontSize:13}}>+ Add To-Do</button>
         </div>
       </header>
