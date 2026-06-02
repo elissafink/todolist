@@ -532,21 +532,32 @@ function App() {
     const json = JSON.stringify(backup, null, 2);
     const filename = "command-center-backup-" + new Date().toISOString().slice(0,10) + ".json";
 
-    // Use Web Share API on mobile (gives native iOS share sheet with Files, Dropbox, etc.)
-    if (navigator.share && navigator.canShare) {
-      try {
-        const file = new File([json], filename, {type: "application/json"});
-        if (navigator.canShare({files: [file]})) {
-          await navigator.share({files: [file], title: "Command Center Backup"});
-          flash("✓ Backup shared");
-          return;
-        }
-      } catch(e) {
-        if (e.name === "AbortError") return; // user cancelled — don't fall through
+    // On iOS Safari, blob URLs and Web Share both have issues with GitHub Pages.
+    // Most reliable approach: encode as a data URI and open in new tab —
+    // Safari shows "Download" button which triggers the native Files/Dropbox picker.
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+    if (isIOS) {
+      // Base64-encode the JSON and open as a data URI in a new tab
+      // Safari will show the file with a download/share button
+      const b64 = btoa(unescape(encodeURIComponent(json)));
+      const dataUri = "data:application/json;base64," + b64;
+      const newTab = window.open();
+      if (newTab) {
+        newTab.document.write(
+          "<html><head><title>" + filename + "</title></head><body style='font-family:sans-serif;padding:20px'>" +
+          "<h2 style='margin-bottom:12px'>✦ Command Center Backup</h2>" +
+          "<p style='margin-bottom:16px;color:#64748b'>Tap the share icon (□↑) in Safari to save to Files, Dropbox, or any app.</p>" +
+          "<a href='" + dataUri + "' download='" + filename + "' style='display:inline-block;padding:12px 24px;background:#6366f1;color:#fff;border-radius:10px;text-decoration:none;font-weight:700;font-size:16px'>⬇ Download " + filename + "</a>" +
+          "<br><br><details><summary style='color:#94a3b8;font-size:13px;cursor:pointer'>Preview JSON</summary><pre style='margin-top:12px;font-size:11px;background:#f8fafc;padding:12px;border-radius:8px;overflow:auto;max-height:400px'>" + json.replace(/</g,"&lt;") + "</pre></details>" +
+          "</body></html>"
+        );
+        newTab.document.close();
       }
+      flash("✓ Tap share (□↑) in the new tab to save");
+      return;
     }
 
-    // Fallback for desktop browsers
+    // Desktop: standard blob download
     const blob = new Blob([json], {type: "application/json"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
