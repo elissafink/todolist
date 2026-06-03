@@ -41,9 +41,8 @@ const STATUS_OPTIONS = [
   { value: "done",        label: "Done",        icon: "✓", color: "#16a34a" },
 ];
 const TYPE_OPTIONS = [
-  "Follow Up Today","Meeting","Boards/Advising","Financial/Tax",
-  "Info to Review","Family/Kids' School","Classes",
-  "Purchases/Shipments Expected","Email","Other",
+  "Email/Text","Meeting/Appt","Phone Call","Errand",
+  "Read/Review","Class","Home","Doc/Sign","Other",
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -446,7 +445,7 @@ function App() {
   const [toast, setToast]       = useState(null);
   const [filter, setFilter]     = useState({status:"all",priority:"all",type:"all",source:"all",search:"",showDone:false});
   // Each sort level: { field, dir }  dir = "asc" | "desc"
-  const [sortLevels, setSortLevels] = useState([{field:"priority",dir:"asc"}]);
+  const [sortLevels, setSortLevels] = useState([{field:"due_date",dir:"asc"},{field:"priority",dir:"asc"}]);
 
   const SORT_FIELDS = [
     {value:"priority",    label:"Priority"},
