@@ -39,6 +39,7 @@ const STATUS_OPTIONS = [
   { value: "in_process",  label: "In Process",  icon: "◑", color: "#2563eb" },
   { value: "waiting",     label: "Waiting",     icon: "⏸", color: "#d97706" },
   { value: "done",        label: "Done",        icon: "✓", color: "#16a34a" },
+  { value: "cancelled",   label: "Cancelled",   icon: "✕", color: "#9ca3af" },
 ];
 const TYPE_OPTIONS = [
   "Email/Text","Meeting/Appt","Phone Call","Errand",
@@ -144,7 +145,7 @@ function Tag({ label, onRemove }) {
 
 function StatusPill({ status }) {
   const s = STATUS_OPTIONS.find(o=>o.value===status)||STATUS_OPTIONS[0];
-  const bg = {not_started:"#f3f4f6",in_process:"#dbeafe",waiting:"#fef3c7",done:"#dcfce7"};
+  const bg = {not_started:"#f3f4f6",in_process:"#dbeafe",waiting:"#fef3c7",done:"#dcfce7",cancelled:"#f3f4f6"};
   return <span style={{background:bg[status]||bg.not_started,color:s.color,borderRadius:99,padding:"2px 10px",fontSize:11,fontWeight:700,letterSpacing:".03em"}}>{s.icon} {s.label}</span>;
 }
 
@@ -497,7 +498,7 @@ function App() {
   const saveTodo = (updated) => {
     const synced = {
       ...updated,
-      completed: updated.status === "done",
+      completed: updated.status === "done" || updated.status === "cancelled",
       completed_date: updated.status === "done" ? (updated.completed_date || new Date().toISOString()) : "",
     };
     const next = todos.find(t=>t.id===synced.id)
@@ -630,7 +631,7 @@ function App() {
         const da = new Date(a[field]||0), db = new Date(b[field]||0);
         result = da - db;
       } else if (field==="status") {
-        const order = {not_started:0,in_process:1,waiting:2,done:3};
+        const order = {not_started:0,in_process:1,waiting:2,done:3,cancelled:4};
         result = (order[a.status]||0) - (order[b.status]||0);
       } else {
         // String fields: title, sender, type
