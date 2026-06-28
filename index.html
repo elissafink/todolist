@@ -30,9 +30,9 @@ const LAST_SYNC_KEY = "todos-last-sync-v2";
 
 const PRIORITY_LABELS = {
   1: { label: "1 · Urgent", color: "#dc2626", bg: "#fef2f2" },
-  2: { label: "2 · High",   color: "#ea580c", bg: "#fff7ed" },
-  3: { label: "3 · Medium", color: "#ca8a04", bg: "#fefce8" },
-  4: { label: "4 · Low",    color: "#16a34a", bg: "#f0fdf4" },
+  2: { label: "2 · High",   color: "#ca8a04", bg: "#fefce8" },
+  3: { label: "3 · Medium", color: "#16a34a", bg: "#f0fdf4" },
+  4: { label: "4 · Low",    color: "#2563eb", bg: "#eff6ff" },
 };
 const STATUS_OPTIONS = [
   { value: "not_started", label: "Not Started", icon: "○", color: "#6b7280" },
@@ -120,7 +120,7 @@ function mergeItems(existing, incoming, sourceFile) {
 }
 
 function parseJSON(raw) {
-  const s = raw.replace(/```json\s*/gi,"").replace(/```/g,"").trim();
+  const tick=String.fromCharCode(96); const s = raw.replace(new RegExp(tick+tick+tick+"json\\s*","gi"),"").replace(new RegExp(tick+tick+tick,"g"),"").trim();
   const positions = ["[","{"].map(c=>s.indexOf(c)).filter(i=>i>=0);
   if (!positions.length) throw new Error("No JSON found");
   const start = Math.min(...positions);
@@ -165,7 +165,7 @@ function RemindersPanel({ onImport, onClose }) {
     if (!text.trim()) { setError("Nothing pasted yet."); return; }
     let parsed;
     try {
-      const s = text.replace(/```json\s*/gi,"").replace(/```/g,"").trim();
+      const tick2=String.fromCharCode(96); const s = text.replace(new RegExp(tick2+tick2+tick2+"json\\s*","gi"),"").replace(new RegExp(tick2+tick2+tick2,"g"),"").trim();
       const positions = ["[","{"].map(c=>s.indexOf(c)).filter(i=>i>=0);
       if (!positions.length) throw new Error("No JSON found");
       const start = Math.min(...positions);
@@ -575,22 +575,62 @@ function App() {
     reader.onload = (ev) => {
       try {
         const parsed = JSON.parse(ev.target.result);
-        // Accept either { version, todos: [...] } or a raw array
         const incoming = Array.isArray(parsed) ? parsed : parsed.todos || [];
         if (!incoming.length) { flash("No to-dos found in file", "warn"); return; }
-        // Merge with existing — preserves any local edits not in the backup
-        const { todos: merged, added, updated } = mergeItems(todos, incoming, null);
-        // For backup restore, keep source_file from the incoming data
-        const restored = merged.map(t => {
-          const src = incoming.find(i => i.id === t.id);
-          return src ? { ...t, source_file: src.source_file } : t;
+
+        // True restore: incoming backup wins for ALL fields including user edits.
+        // Start with a map of existing todos by id and by email link.
+        const existingById = {};
+        const existingByLink = {};
+        todos.forEach(t => {
+          existingById[t.id] = t;
+          if (t.source_email_link) existingByLink[t.source_email_link] = t;
         });
-        persist(restored);
-        flash("✓ " + added + " restored · " + updated + " updated");
+
+        let added = 0, updated = 0;
+        const restored = incoming.map(item => {
+          // Backup items always win — they already contain the user's saved edits.
+          // We just need to make sure required fields exist.
+          const base = existingById[item.id] || (item.source_email_link && existingByLink[item.source_email_link]);
+          if (base) updated++; else added++;
+          return {
+            id:              item.id || genId(),
+            title:           item.title || "(no title)",
+            type:            item.type  || "Other",
+            priority:        Number(item.priority) || 3,
+            details:         item.details || "",
+            source_email_account: item.source_email_account || "",
+            source_email_link:    item.source_email_link || "",
+            date_received:   item.date_received || "",
+            due_date:        item.due_date || "",
+            sender:          item.sender || "",
+            source_file:     item.source_file || "",
+            // User-edited fields — fully restored from backup
+            status:          item.status         || "not_started",
+            tags:            item.tags            || [],
+            notes:           item.notes           || "",
+            scheduled_date:  item.scheduled_date  || "",
+            subtasks:        item.subtasks         || [],
+            completed:       item.completed        || false,
+            completed_date:  item.completed_date   || "",
+            date_added:      item.date_added       || new Date().toISOString(),
+            last_synced:     item.last_synced      || new Date().toISOString(),
+          };
+        });
+
+        // Also keep any local todos NOT in the backup (added manually after last backup)
+        const restoredIds = new Set(restored.map(t => t.id));
+        const restoredLinks = new Set(restored.map(t => t.source_email_link).filter(Boolean));
+        const localOnly = todos.filter(t =>
+          !restoredIds.has(t.id) &&
+          !(t.source_email_link && restoredLinks.has(t.source_email_link))
+        );
+
+        persist([...restored, ...localOnly]);
+        flash("✓ " + added + " restored · " + updated + " updated · " + localOnly.length + " local-only kept");
       } catch(err) {
         flash("Could not read backup file: " + err.message, "warn");
       }
-      // Reset file input so same file can be re-imported
       e.target.value = "";
     };
     reader.readAsText(file);
